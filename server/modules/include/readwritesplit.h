@@ -32,6 +32,7 @@
 #include <dcb.h>
 #include <hashtable.h>
 #include <math.h>
+#include <route_classifier.h>
 
 #undef PREP_STMT_CACHING
 
@@ -75,15 +76,6 @@ typedef enum backend_type_t {
 } backend_type_t;
 
 struct router_instance;
-
-typedef enum {
-	TARGET_UNDEFINED    = 0x00,
-        TARGET_MASTER       = 0x01,
-        TARGET_SLAVE        = 0x02,
-        TARGET_NAMED_SERVER = 0x04,
-        TARGET_ALL          = 0x08,
-        TARGET_RLAG_MAX     = 0x10
-} route_target_t;
 
 #define TARGET_IS_MASTER(t)       (t & TARGET_MASTER)
 #define TARGET_IS_SLAVE(t)        (t & TARGET_SLAVE)
