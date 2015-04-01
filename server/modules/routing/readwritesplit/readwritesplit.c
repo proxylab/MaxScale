@@ -2622,7 +2622,15 @@ static void clientReply (
 		goto lock_failed;
 	}
 #endif
-	
+	/* Save some server info into the buffer in order to consume it 
+         * on the clientReply function of the filters
+         */      
+        /*char srv_id[32];
+        sprintf(srv_id, "%ld", bref->bref_backend->backend_server->node_id);
+        gwbuf_add_property(writebuf, "SERVER_ID", srv_id);
+        gwbuf_add_property(writebuf, "SERVER_NAME", bref->bref_backend->backend_server->name);        
+        gwbuf_add_property(writebuf, "SERVER_UNIQUE_NAME", bref->bref_backend->backend_server->unique_name);*/
+        
         CHK_BACKEND_REF(bref);
         scur = &bref->bref_sescmd_cur;
         /**

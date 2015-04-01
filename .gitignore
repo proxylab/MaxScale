@@ -34,3 +34,5 @@ depend.mk
 
 # Vi swap files
 .*.swp
+/nbproject/
+/build/

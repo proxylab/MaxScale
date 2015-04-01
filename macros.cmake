@@ -52,7 +52,10 @@ macro(set_variables)
   
   # Build RabbitMQ components
   set(BUILD_RABBITMQ FALSE CACHE BOOL "Build RabbitMQ components")
-  
+
+  # Build Redis filter
+  set(BUILD_REDIS FALSE CACHE BOOL "Build Redis pipeline filter")
+
   # Use gcov build flags
   set(GCOV FALSE CACHE BOOL "Use gcov build flags")
 

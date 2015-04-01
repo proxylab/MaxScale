@@ -101,6 +101,7 @@ struct subcommand {
 };
 
 static	void	telnetdShowUsers(DCB *);
+static  void    dprintProcessID(DCB *);
 /**
  * The subcommands of the show command
  */
@@ -184,6 +185,10 @@ struct subcommand showoptions[] = {
 	{ "users",	0, telnetdShowUsers,
 			"Show statistics and user names for the debug interface",
 			"Show statistics and user names for the debug interface",
+				{0, 0, 0} },
+        { "pid",	0, dprintProcessID,
+			"Show the process id that MaxScale is running",
+			"Show the process id that MaxScale is running",
 				{0, 0, 0} },
 	{ NULL,		0, NULL,		NULL,	NULL,
 				{0, 0, 0} }
@@ -954,6 +959,17 @@ bool in_space = false;
 	memset(cli->cmdbuf, 0, 80);
 
 	return 1;
+}
+
+/**
+ * Debug command to print the MaxScale's process id
+ *
+ * @param dcb	The DCB to print the user data to
+ */
+static void
+dprintProcessID(DCB *dcb)
+{
+	dcb_printf(dcb, "Process ID: %d\n", getpid());
 }
 
 /**
