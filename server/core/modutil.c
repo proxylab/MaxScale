@@ -31,6 +31,20 @@
 #include <buffer.h>
 #include <string.h>
 #include <mysql_client_server_protocol.h>
+#include <modutil.h>
+
+/** Defined in log_manager.cc */
+extern int            lm_enabled_logfiles_bitmask;
+extern size_t         log_ses_count[];
+extern __thread log_info_t tls_log_info;
+
+static void modutil_reply_routing_error(
+	DCB*  	 backend_dcb,
+	int   	 error,
+	char* 	 state,
+	char* 	 errstr,
+	uint32_t flags);
+
 
 /**
  * Check if a GWBUF structure is a MySQL COM_QUERY packet
@@ -47,6 +61,23 @@ unsigned char	*ptr;
 		return 0;
 	ptr = GWBUF_DATA(buf);
 	return ptr[4] == 0x03;		// COM_QUERY
+}
+
+/**
+ * Check if a GWBUF structure is a MySQL COM_STMT_PREPARE packet
+ *
+ * @param	buf	Buffer to check
+ * @return	True if GWBUF is a COM_STMT_PREPARE packet
+ */
+int
+modutil_is_SQL_prepare(GWBUF *buf)
+{
+unsigned char	*ptr;
+
+	if (GWBUF_LENGTH(buf) < 5)
+		return 0;
+	ptr = GWBUF_DATA(buf);
+	return ptr[4] == 0x16 ;		// COM_STMT_PREPARE
 }
 
 /**
@@ -192,6 +223,10 @@ GWBUF	*addition;
 		/* New SQL is shorter */
 		memcpy(ptr, sql, newlength);
 		GWBUF_RTRIM(orig, (length - 1) - newlength);
+                ptr = GWBUF_DATA(orig);
+		*ptr++ = (newlength + 1) & 0xff;
+		*ptr++ = ((newlength + 1) >> 8) & 0xff;
+		*ptr++ = ((newlength + 1) >> 16) & 0xff;
 	}
 	else
 	{
@@ -223,9 +258,9 @@ char *
 modutil_get_SQL(GWBUF *buf)
 {
 unsigned int	len, length;
-unsigned char	*ptr, *dptr, *rval = NULL;
+char	*ptr, *dptr, *rval = NULL;
 
-	if (!modutil_is_SQL(buf))
+	if (!modutil_is_SQL(buf) && !modutil_is_SQL_prepare(buf))
 		return rval;
 	ptr = GWBUF_DATA(buf);
 	length = *ptr++;
@@ -327,7 +362,7 @@ GWBUF *modutil_create_mysql_err_msg(
 	const char	*msg)
 {
 	uint8_t		*outbuf = NULL;
-	uint32_t		mysql_payload_size = 0;
+	uint32_t	mysql_payload_size = 0;
 	uint8_t		mysql_packet_header[4];
 	uint8_t		*mysql_payload = NULL;
 	uint8_t		field_count = 0;
@@ -492,4 +527,314 @@ GWBUF* modutil_get_next_MySQL_packet(
 	
 return_packetbuf:
 	return packetbuf;
+}
+
+/**
+ * Parse the buffer and split complete packets into individual buffers.
+ * Any partial packets are left in the old buffer.
+ * @param p_readbuf Buffer to split, set to NULL if no partial packets are left
+ * @return Head of the chain of complete packets, all in a single, contiguous buffer
+ */
+GWBUF* modutil_get_complete_packets(GWBUF** p_readbuf)
+{
+    GWBUF *buff = NULL, *packet;
+    uint8_t *ptr,*end;
+    int len,blen,total = 0;
+
+    if(p_readbuf == NULL || (*p_readbuf) == NULL ||
+       gwbuf_length(*p_readbuf) < 3)
+	return NULL;
+
+    packet = gwbuf_make_contiguous(*p_readbuf);
+    packet->next = NULL;
+    *p_readbuf = packet;
+    ptr = (uint8_t*)packet->start;
+    end = (uint8_t*)packet->end;
+    len = gw_mysql_get_byte3(ptr) + 4;
+    blen = gwbuf_length(packet);
+    
+    if(len == blen)
+    {
+	    *p_readbuf = NULL;
+	    return packet;
+    }
+    else if(len > blen)
+    {
+	return NULL;
+    }
+
+    while(total + len < blen)
+    {
+	ptr += len;
+	total += len;
+	len = gw_mysql_get_byte3(ptr) + 4;
+    }
+
+    /** Full packets only, return original */
+    if(total + len == blen)
+    {
+	*p_readbuf = NULL;
+	return packet;
+    }
+
+    /** The next packet is a partial, split into complete and partial packets */
+    if((buff = gwbuf_alloc(total)) == NULL)
+    {
+	skygw_log_write(LOGFILE_ERROR,
+		 "Error: Failed to allocate new buffer "
+		" of %d bytes while splitting buffer"
+		" into complete packets.",
+		 total);
+	return NULL;
+    }
+    buff->next = NULL;
+    gwbuf_set_type(buff,GWBUF_TYPE_MYSQL);
+    memcpy(buff->start,packet->start,total);
+    gwbuf_consume(packet,total);
+    return buff;
+}
+
+/**
+ * Count the number of EOF, OK or ERR packets in the buffer. Only complete
+ * packets are inspected and the buffer is assumed to only contain whole packets.
+ * If partial packets are in the buffer, they are ignored. The caller must handle the
+ * detection of partial packets in buffers.
+ * @param reply Buffer to use
+ * @param use_ok Whether the DEPRECATE_EOF flag is set
+ * @param n_found If there were previous packets found 
+ * @return Number of EOF packets
+ */
+int
+modutil_count_signal_packets(GWBUF *reply, int use_ok,  int n_found, int* more)
+{
+    unsigned char* ptr = (unsigned char*) reply->start;
+    unsigned char* end = (unsigned char*) reply->end;
+    unsigned char* prev = ptr;
+    int pktlen, eof = 0, err = 0;
+    int errlen = 0, eoflen = 0;
+    int iserr = 0, iseof = 0;
+    bool moreresults = false;
+    while(ptr < end)
+    {
+
+        pktlen = MYSQL_GET_PACKET_LEN(ptr) + 4;
+
+        if((iserr = PTR_IS_ERR(ptr)) || (iseof = PTR_IS_EOF(ptr)))
+        {
+            if(iserr)
+            {
+                err++;
+                errlen = pktlen;
+            }
+            else if(iseof)
+            {
+                eof++;
+                eoflen = pktlen;
+            }
+        }
+        
+        if((ptr + pktlen) > end || (eof + n_found) >= 2)
+        {
+	    moreresults = PTR_EOF_MORE_RESULTS(ptr);
+            ptr = prev;    
+            break;
+        }
+        
+        prev = ptr;
+        ptr += pktlen;
+    }
+
+
+    /*
+     * If there were new EOF/ERR packets found, make sure that they are the last
+     * packet in the buffer.
+     */
+    if((eof || err) && n_found)
+    {
+        if(err)
+        {
+            ptr -= errlen;
+            if(!PTR_IS_ERR(ptr))
+                err = 0;
+        }
+        else
+        {
+            ptr -= eoflen;
+            if(!PTR_IS_EOF(ptr))
+                eof = 0;
+        }
+    }
+
+    *more = moreresults;
+
+    return(eof + err);
+}
+
+/**
+ * Create parse error and EPOLLIN event to event queue of the backend DCB.
+ * When event is notified the error message is processed as error reply and routed 
+ * upstream to client.
+ * 
+ * @param backend_dcb	DCB where event is added
+ * @param errstr	Plain-text string error
+ * @param flags		GWBUF type flags
+ */
+void modutil_reply_parse_error(
+	DCB*  	 backend_dcb,
+	char* 	 errstr,
+	uint32_t flags)
+{
+	CHK_DCB(backend_dcb);
+	modutil_reply_routing_error(backend_dcb, 1064, "42000", errstr, flags);
+}
+
+/**
+ * Create authentication error and EPOLLIN event to event queue of the backend DCB.
+ * When event is notified the error message is processed as error reply and routed 
+ * upstream to client.
+ * 
+ * @param backend_dcb	DCB where event is added
+ * @param errstr	Plain-text string error
+ * @param flags		GWBUF type flags
+ */
+void modutil_reply_auth_error(
+	DCB*  	 backend_dcb,
+	char* 	 errstr,
+	uint32_t flags)
+{
+	CHK_DCB(backend_dcb);
+	modutil_reply_routing_error(backend_dcb, 1045, "28000", errstr, flags);
+}
+
+
+/**
+ * Create error message and EPOLLIN event to event queue of the backend DCB.
+ * When event is notified the message is processed as error reply and routed 
+ * upstream to client.
+ * 
+ * @param backend_dcb	DCB where event is added
+ * @param error		SQL error number
+ * @param state		SQL state
+ * @param errstr	Plain-text string error
+ * @param flags		GWBUF type flags
+ */
+static void modutil_reply_routing_error(
+	DCB*  	 backend_dcb,
+	int   	 error,
+	char* 	 state,
+	char* 	 errstr,
+	uint32_t flags)
+{
+	GWBUF* buf;
+	CHK_DCB(backend_dcb);
+	
+	buf = modutil_create_mysql_err_msg(1, 0, error, state, errstr);
+	free(errstr);
+	
+	if (buf == NULL)
+	{
+		LOGIF(LE, (skygw_log_write_flush(
+			LOGFILE_ERROR,
+			"Error : Creating routing error message failed."))); 
+		return;
+	}
+	/** Set flags that help router to process reply correctly */
+	gwbuf_set_type(buf, flags);
+	/** Create an incoming event for backend DCB */
+	poll_add_epollin_event_to_dcb(backend_dcb, buf);
+	return;
+}
+
+/**
+ * Find the first occurrence of a character in a string. This function ignores
+ * escaped characters and all characters that are enclosed in single or double quotes.
+ * @param ptr Pointer to area of memory to inspect
+ * @param c Character to search for
+ * @param len Size of the memory area
+ * @return Pointer to the first non-escaped, non-quoted occurrence of the character.
+ * If the character is not found, NULL is returned.
+ */
+void* strnchr_esc(char* ptr,char c, int len)
+{
+    char* p = (char*)ptr;
+    char* start = p;
+    bool quoted = false, escaped = false;
+    char qc;
+
+    while(p < start + len)
+    {
+	if(escaped)
+	{
+	    escaped = false;
+	}
+	else if(*p == '\\')
+	{
+	    escaped = true;
+	}
+	else if((*p == '\'' || *p  == '"') && !quoted)
+	{
+	    quoted = true;
+	    qc = *p;
+	}
+	else if(quoted && *p == qc)
+	{
+	    quoted = false;
+	}
+	else if(*p == c && !escaped && !quoted)
+	{
+	    return p;
+	}
+	p++;
+    }
+    
+    return NULL;
+}
+
+/**
+ * Create a COM_QUERY packet from a string.
+ * @param query Query to create.
+ * @return Pointer to GWBUF with the query or NULL if an error occurred.
+ */
+GWBUF* modutil_create_query(char* query)
+{
+    if(query == NULL)
+	return NULL;
+
+    GWBUF* rval = gwbuf_alloc(strlen(query) + 5);
+    int pktlen = strlen(query) + 1;
+    unsigned char* ptr;
+
+    if(rval)
+    {
+	ptr = (unsigned char*)rval->start;
+	*ptr++ = (pktlen);
+	*ptr++ = (pktlen)>>8;
+	*ptr++ = (pktlen)>>16;
+	*ptr++ = 0x0;
+	*ptr++ = 0x03;
+	memcpy(ptr,query,strlen(query));
+	gwbuf_set_type(rval,GWBUF_TYPE_MYSQL);
+    }
+
+    return rval;
+}
+
+/**
+ * Count the number of statements in a query.
+ * @param buffer Buffer to analyze.
+ * @return Number of statements.
+ */
+int modutil_count_statements(GWBUF* buffer)
+{
+    char* ptr = ((char*)(buffer)->start + 5);
+    char* end = ((char*)(buffer)->end);
+    int num = 1;
+
+    while((ptr = strnchr_esc(ptr,';', end - ptr)))
+    {
+	num++;
+	ptr++;
+    }
+
+    return num;
 }
