@@ -53,7 +53,7 @@
 #include <dcb.h>
 #include <session.h>
 #include <modules.h>
-#include <config.h>
+#include <maxconfig.h>
 #include <poll.h>
 #include <housekeeper.h>
 #include <service.h>
@@ -78,6 +78,8 @@
 #if !defined(_GNU_SOURCE)
 #  define _GNU_SOURCE
 #endif
+
+time_t	MaxScaleStarted;
 
 extern char *program_invocation_name;
 extern char *program_invocation_short_name;
@@ -148,6 +150,8 @@ static struct option long_options[] = {
   {"config",   required_argument, 0, 'f'},
   {"nodaemon", no_argument,       0, 'd'},
   {"log",      required_argument, 0, 'l'},
+  {"syslog",   required_argument, 0, 's'},
+  {"maxscalelog",   required_argument, 0, 'S'},
   {"version",  no_argument,       0, 'v'},
   {"help",     no_argument,       0, '?'},
   {0, 0, 0, 0}
@@ -217,6 +221,7 @@ static void sigterm_handler (int i) {
 	LOGIF(LE, (skygw_log_write_flush(
                 LOGFILE_ERROR,
                 "MaxScale received signal SIGTERM. Exiting.")));
+	skygw_log_sync_all();
 	shutdown_server();
 }
 
@@ -228,6 +233,7 @@ sigint_handler (int i)
 	LOGIF(LE, (skygw_log_write_flush(
                 LOGFILE_ERROR,
                 "MaxScale received signal SIGINT. Shutting down.")));
+	skygw_log_sync_all();
 	shutdown_server();
 	fprintf(stderr, "\n\nShutting down MaxScale\n\n");
 }
@@ -269,6 +275,8 @@ sigfatal_handler (int i)
 			backtrace_symbols_fd(addrs, count, fileno(stderr));
 		}
 	}
+
+	skygw_log_sync_all();
 
 	/* re-raise signal to enforce core dump */
 	fprintf(stderr, "\n\nWriting core dump\n");
@@ -628,7 +636,8 @@ static bool resolve_maxscale_homedir(
          * 3. if /etc/MaxScale/MaxScale.cnf didn't exist or wasn't accessible, home
          *    isn't specified. Thus, try to access $PWD/MaxScale.cnf .
          */
-        tmp = strndup(getenv("PWD"), PATH_MAX);
+	char *pwd = getenv("PWD");
+        tmp = strndup(pwd ? pwd : "PWD_NOT_SET", PATH_MAX);
         tmp2 = get_expanded_pathname(p_home_dir, tmp, default_cnf_fname);
 	free(tmp2); /*< full path isn't needed so simply free it */
 	
@@ -817,6 +826,7 @@ static bool file_is_readable(
                         absolute_pathname,
                         eno,
                         strerror(eno))));
+		LOGIF(LE,(skygw_log_sync_all()));
                 succp = false;
         }
         return succp;
@@ -988,6 +998,10 @@ static void usage(void)
 		"                    (default: $MAXSCALE_HOME/etc/MaxScale.cnf)\n"
 		"  -l|--log=...      log to file or shared memory\n"
 		"                    -lfile or -lshm - defaults to shared memory\n"
+		"  -s|--syslog=	     log messages to syslog."
+		" True or false - defaults to true\n"
+		"  -S|--maxscalelog= log messages to MaxScale log."
+		" True or false - defaults to true\n"
 		"  -v|--version      print version info and exit\n"
                 "  -?|--help         show this help\n"
 		, progname);
@@ -1035,6 +1049,7 @@ int main(int argc, char **argv)
         int 	 l;
         int	 i;
         int      n;
+	intptr_t thread_id;
         int      n_threads; /*< number of epoll listener threads */ 
         int      n_services;
         int      eno = 0;   /*< local variable for errno */
@@ -1049,6 +1064,8 @@ int main(int argc, char **argv)
         void*    log_flush_thr = NULL;
 	int      option_index;
 	int	 logtofile = 0;	      	      /* Use shared memory or file */
+	int	 syslog_enabled = 1; /** Log to syslog */
+	int	 maxscalelog_enabled = 1; /** Log with MaxScale */
         ssize_t  log_flush_timeout_ms = 0;
         sigset_t sigset;
         sigset_t sigpipe_mask;
@@ -1088,11 +1105,11 @@ int main(int argc, char **argv)
                         goto return_main;
                 }
         }
-        while ((opt = getopt_long(argc, argv, "dc:f:l:v?",
+        while ((opt = getopt_long(argc, argv, "dc:f:l:vs:S:?",
 				 long_options, &option_index)) != -1)
         {
                 bool succp = true;
-                
+
                 switch (opt) {
                 case 'd':
                         /*< Debug mode, maxscale runs in this same process */
@@ -1173,6 +1190,7 @@ int main(int argc, char **argv)
 			
 		case 'v':
 		  rc = EXIT_SUCCESS;
+          printf("%s\n",MAXSCALE_VERSION);
                   goto return_main;		  
 
 		case 'l':
@@ -1192,7 +1210,28 @@ int main(int argc, char **argv)
                                 succp = false;
 			}
 			break;
-		  
+		case 'S':
+		    if(strstr(optarg,"="))
+		    {
+			strtok(optarg,"= ");
+			maxscalelog_enabled = config_truth_value(strtok(NULL,"= "));
+		    }
+		    else
+		    {
+			maxscalelog_enabled = config_truth_value(optarg);
+		    }
+		    break;
+		case 's':
+		    if(strstr(optarg,"="))
+		    {
+			strtok(optarg,"= ");
+			syslog_enabled = config_truth_value(strtok(NULL,"= "));
+		    }
+		    else
+		    {
+			syslog_enabled = config_truth_value(optarg);
+		    }
+		    break;
 		case '?':
 		  usage();
 		  rc = EXIT_SUCCESS;
@@ -1527,7 +1566,7 @@ int main(int argc, char **argv)
 		free(log_context);
 	}
 
-        /*<
+        /**
          * Init Log Manager for MaxScale.
          * If $MAXSCALE_HOME is set then write the logs into $MAXSCALE_HOME/log.
          * The skygw_logmanager_init expects to take arguments as passed to main
@@ -1537,23 +1576,40 @@ int main(int argc, char **argv)
         {
                 char buf[1024];
                 char *argv[8];
-				bool succp;
-				
+		bool succp;
+		/** Set log directory under $MAXSCALE_HOME/log */
                 sprintf(buf, "%s/log", home_dir);
-				if(mkdir(buf, 0777) != 0){
-					
-					if(errno != EEXIST){
-						fprintf(stderr,
-								"Error: Cannot create log directory: %s\n",buf);
-						goto return_main;
-					}
-				}
+		
+		if(mkdir(buf, 0777) != 0)
+		{
+			if(errno != EEXIST)
+			{
+				fprintf(stderr,
+					"Error: Cannot create log directory: %s\n",
+					buf);
+				goto return_main;
+			}
+		}
                 argv[0] = "MaxScale";
                 argv[1] = "-j";
                 argv[2] = buf;
+
+		if(!syslog_enabled)
+		{
+		    printf("Syslog logging is disabled.\n");
+		}
+		
+		if(!maxscalelog_enabled)
+		{
+		    printf("MaxScale logging is disabled.\n");
+		}
+		logmanager_enable_syslog(syslog_enabled);
+		logmanager_enable_maxscalelog(maxscalelog_enabled);
+
 		if (logtofile)
 		{
 			argv[3] = "-l"; /*< write to syslog */
+			/** Logs that should be syslogged */
 			argv[4] = "LOGFILE_MESSAGE,LOGFILE_ERROR"
 				"LOGFILE_DEBUG,LOGFILE_TRACE"; 
 			argv[5] = NULL;
@@ -1562,9 +1618,9 @@ int main(int argc, char **argv)
 		else
 		{
 			argv[3] = "-s"; /*< store to shared memory */
-			argv[4] = "LOGFILE_DEBUG,LOGFILE_TRACE";   /*< ..these logs to shm */
+			argv[4] = "LOGFILE_DEBUG,LOGFILE_TRACE"; /*< to shm */
 			argv[5] = "-l"; /*< write to syslog */
-			argv[6] = "LOGFILE_MESSAGE,LOGFILE_ERROR"; /*< ..these logs to syslog */
+			argv[6] = "LOGFILE_MESSAGE,LOGFILE_ERROR"; /*< to syslog */
 			argv[7] = NULL;
 			succp = skygw_logmanager_init(7, argv);
 		}
@@ -1575,8 +1631,7 @@ int main(int argc, char **argv)
 			goto return_main;
 		}
         }
-
-        /*<
+        /**
          * Resolve the full pathname for configuration file and check for
          * read accessibility.
          */
@@ -1779,13 +1834,15 @@ int main(int argc, char **argv)
         /*<
          * Start server threads.
          */
-        for (n = 0; n < n_threads - 1; n++)
+        for (thread_id = 0; thread_id < n_threads - 1; thread_id++)
         {
-                threads[n] = thread_start(poll_waitevents, (void *)(n + 1));
+                threads[thread_id] = thread_start(poll_waitevents, (void *)(thread_id + 1));
         }
         LOGIF(LM, (skygw_log_write(LOGFILE_MESSAGE,
                         "MaxScale started with %d server threads.",
                                    config_threadcount())));
+
+	MaxScaleStarted = time(0);
         /*<
          * Serve clients.
          */
@@ -1794,9 +1851,9 @@ int main(int argc, char **argv)
         /*<
          * Wait server threads' completion.
          */
-        for (n = 0; n < n_threads - 1; n++)
+        for (thread_id = 0; thread_id < n_threads - 1; thread_id++)
         {
-                thread_wait(threads[n]);
+                thread_wait(threads[thread_id]);
         }        
         /*<
          * Wait the flush thread.
@@ -1939,4 +1996,10 @@ static int write_pid_file(char *home_dir) {
 
 	/* success */
 	return 0;
+}
+
+int
+MaxScaleUptime()
+{
+	return time(0) - MaxScaleStarted;
 }

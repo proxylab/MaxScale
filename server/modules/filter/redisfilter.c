@@ -160,6 +160,7 @@ typedef struct {
         int     redisPort;              /* Redis server port */
         char    *redisSock;             /* Redis Unix Socket */
         redisContext *ctx;              /* The Redis context */
+        SPINLOCK ctx_lock;
         
         bool    saveRealOnly;           /* Save only real queries */
 } REDIS_INSTANCE;
@@ -296,6 +297,7 @@ createInstance(char **options, FILTER_PARAMETER **params)
     
     if ((my_instance = calloc(1, sizeof(REDIS_INSTANCE))) != NULL)
     {
+        spinlock_init(&my_instance->ctx_lock);
         my_instance->match = NULL;
         my_instance->exclude = NULL;
         my_instance->source = NULL;
@@ -382,11 +384,13 @@ createInstance(char **options, FILTER_PARAMETER **params)
             return NULL;
         }
         
-        if (pthread_mutex_init(&lock, NULL) != 0)
+        /*if (pthread_mutex_init(&lock, NULL) != 0)
         {
             skygw_log_write(LOGFILE_ERROR, "redisfilter: pthread_mutex_init failure:\n");
             return NULL;
-        }
+        }*/
+        
+        spinlock_acquire(&my_instance->ctx_lock);
         
         // Redis connect
         struct timeval timeout = { 1, 500000 }; // 1.5 seconds
@@ -403,8 +407,9 @@ createInstance(char **options, FILTER_PARAMETER **params)
         }
         
         my_instance->ctx = c;
+        spinlock_release(&my_instance->ctx_lock);
         
-        pthread_create (&thread_t, NULL, redisSender, (void *) c);
+        //pthread_create (&thread_t, NULL, redisSender, (void *) c);
 
         skygw_log_write(LOGFILE_TRACE, "redisfilter instance created.");
     }
@@ -542,7 +547,6 @@ routeQuery(FILTER *instance, void *session, GWBUF *queue)
     REDIS_INSTANCE    *my_instance = (REDIS_INSTANCE *)instance;
     REDIS_SESSION     *my_session = (REDIS_SESSION *)session;
     char            *ptr = NULL;
-    int             length;
         
     if (my_session->active)
     {       
@@ -581,7 +585,7 @@ routeQuery(FILTER *instance, void *session, GWBUF *queue)
                     my_session->current->statementType = QUERY_TYPE_UNKNOWN;
 
                     gettimeofday(&my_session->current->requestTime, NULL);
-                    my_session->current->sqlQuery = strndup(ptr, length);        
+                    my_session->current->sqlQuery = strdup((const char*) ptr);        
 
                     int i, tbl_count = 0;
                     char **tables;
@@ -721,7 +725,7 @@ clientReply(FILTER *instance, void *session, GWBUF *reply)
         char *srv = gwbuf_get_property(reply, "SERVER_NAME");
         char *srv_id = gwbuf_get_property(reply, "SERVER_ID");
         char *srv_uniq = gwbuf_get_property(reply, "SERVER_UNIQUE_NAME");
-
+        
         if(srv)
             my_session->current->serverName = strdup(srv);
 
@@ -782,10 +786,13 @@ clientReply(FILTER *instance, void *session, GWBUF *reply)
         else{
             
         }
+        
+        spinlock_acquire(&my_instance->ctx_lock);
 
         if (my_instance->ctx == NULL) {
             skygw_log_write(LOGFILE_ERROR, "redisfilter: NULL Redis Context");
             freeInfo(&my_session->current);
+            spinlock_release(&my_instance->ctx_lock);
             goto send_to_upstream;
         }
         
@@ -794,18 +801,19 @@ clientReply(FILTER *instance, void *session, GWBUF *reply)
         JsonNode* infoNode = infoToJson(my_session->current);
         if (infoNode == NULL) {
             freeInfo(&my_session->current);
+            spinlock_release(&my_instance->ctx_lock);
             goto send_to_upstream;
         }
         
         /* THREADED start*/
-        /*pthread_mutex_lock(&lock);
-        
-        the_msg.json_tree = infoNode;
-        the_msg.request_time = my_session->current->requestTime;
-        
-        pthread_cond_signal(&sig_consumer);
-        pthread_cond_wait(&sig_producer, &lock);
-        pthread_mutex_unlock(&lock);*/
+//        pthread_mutex_lock(&lock);
+//        
+//        the_msg.json_tree = infoNode;
+//        the_msg.request_time = my_session->current->requestTime;
+//        
+//        pthread_cond_signal(&sig_consumer);
+//        pthread_cond_wait(&sig_producer, &lock);
+//        pthread_mutex_unlock(&lock);
         /* THREADED end*/
         
         /* SYNCED start*/
@@ -829,6 +837,7 @@ clientReply(FILTER *instance, void *session, GWBUF *reply)
         /* SYNCED end*/
         
         freeInfo(&my_session->current);
+        spinlock_release(&my_instance->ctx_lock);
     }
 
 send_to_upstream:

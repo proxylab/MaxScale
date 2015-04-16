@@ -1,6 +1,8 @@
 if(BUILD_RABBITMQ)
+  find_package(RabbitMQ)
+  include_directories(${RABBITMQ_HEADERS})
   add_library(mqfilter SHARED mqfilter.c)
-  target_link_libraries(mqfilter query_classifier log_manager utils rabbitmq)
+  target_link_libraries(mqfilter query_classifier log_manager utils ${RABBITMQ_LIBRARIES})
   install(TARGETS mqfilter DESTINATION modules)
 endif()
 
@@ -10,6 +12,15 @@ if(BUILD_REDIS)
   add_library(redisfilter SHARED redisfilter.c)
   target_link_libraries(redisfilter query_classifier log_manager utils ${HIREDIS_LIBRARIES})
   install(TARGETS redisfilter DESTINATION modules)
+endif()
+
+if(BUILD_ZMQ)
+  find_package(Zmq)
+  find_package(CZmq)
+  include_directories(${CZMQ_HEADERS})
+  add_library(zmqfilter SHARED zmqfilter.c)
+  target_link_libraries(zmqfilter query_classifier log_manager utils ${ZMQ_LIBRARIES} ${CZMQ_LIBRARIES})
+  install(TARGETS zmqfilter DESTINATION modules)
 endif()
 
 add_library(regexfilter SHARED regexfilter.c)
@@ -31,6 +42,27 @@ install(TARGETS tee DESTINATION modules)
 add_library(topfilter SHARED topfilter.c)
 target_link_libraries(topfilter log_manager utils)
 install(TARGETS topfilter DESTINATION modules)
+
+add_library(dbfwfilter SHARED dbfwfilter.c)
+target_link_libraries(dbfwfilter log_manager utils query_classifier)
+install(TARGETS dbfwfilter DESTINATION modules)
+
+add_library(namedserverfilter SHARED namedserverfilter.c)
+target_link_libraries(namedserverfilter log_manager utils)
+install(TARGETS namedserverfilter DESTINATION modules)
+
+if(BUILD_SLAVELAG)
+  add_library(slavelag SHARED slavelag.c)
+  target_link_libraries(slavelag log_manager utils query_classifier)
+  install(TARGETS slavelag DESTINATION modules)
+endif()
+
+if(BUILD_TOOLS)
+  add_executable(ruleparser dbfwfilter.c)
+  target_compile_definitions(ruleparser PUBLIC "BUILD_RULE_PARSER")
+  target_link_libraries(ruleparser  ${EMBEDDED_LIB} log_manager utils query_classifier fullcore)
+  install(TARGETS ruleparser DESTINATION tools)
+endif()
 
 add_subdirectory(hint)
 

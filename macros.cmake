@@ -1,3 +1,4 @@
+
 function(debugmsg MSG)
   if(DEBUG_OUTPUT)
 	message(STATUS "DEBUG: ${MSG}")
@@ -8,20 +9,14 @@ macro(set_maxscale_version)
 
   #MaxScale version number
   set(MAXSCALE_VERSION_MAJOR "1")
-  set(MAXSCALE_VERSION_MINOR "0")
-  set(MAXSCALE_VERSION_PATCH "5") 
+  set(MAXSCALE_VERSION_MINOR "1")
+  set(MAXSCALE_VERSION_PATCH "0") 
   set(MAXSCALE_VERSION_NUMERIC "${MAXSCALE_VERSION_MAJOR}.${MAXSCALE_VERSION_MINOR}.${MAXSCALE_VERSION_PATCH}")
-  set(MAXSCALE_VERSION "${MAXSCALE_VERSION_MAJOR}.${MAXSCALE_VERSION_MINOR}.${MAXSCALE_VERSION_PATCH}-unstable")
+  set(MAXSCALE_VERSION "${MAXSCALE_VERSION_MAJOR}.${MAXSCALE_VERSION_MINOR}.${MAXSCALE_VERSION_PATCH}")
 
 endmacro()
 
 macro(set_variables)
-
-  # Installation directory
-  set(INSTALL_DIR "/usr/local/skysql/maxscale/" CACHE PATH "MaxScale installation directory.")
-  
-  # Build type
-  set(BUILD_TYPE "None" CACHE STRING "Build type, possible values are:None, Debug, Optimized.")
   
   # hostname or IP address of MaxScale's host
   set(TEST_HOST "127.0.0.1" CACHE STRING "hostname or IP address of MaxScale's host")
@@ -31,6 +26,9 @@ macro(set_variables)
 
   # port of read/write split router module
   set(TEST_PORT_RW "4006" CACHE STRING "port of read/write split router module")
+
+  # port of schemarouter router module
+  set(TEST_PORT_DB "4010" CACHE STRING "port of schemarouter router module")
 
   # port of read/write split router module with hints
   set(TEST_PORT_RW_HINT "4009" CACHE STRING "port of read/write split router module with hints")
@@ -46,24 +44,36 @@ macro(set_variables)
 
   # password of MaxScale user
   set(TEST_PASSWORD "maxpwd" CACHE STRING "password of MaxScale user")
-  
+
   # Use static version of libmysqld
   set(STATIC_EMBEDDED TRUE CACHE BOOL "Use static version of libmysqld")
-  
+
   # Build RabbitMQ components
   set(BUILD_RABBITMQ FALSE CACHE BOOL "Build RabbitMQ components")
 
+  # Build ZeroMQ pipeline filter
+  set(BUILD_ZEROMQ FALSE CACHE BOOL "Build ZeroMQ pipeline filter")
+
   # Build Redis filter
   set(BUILD_REDIS FALSE CACHE BOOL "Build Redis pipeline filter")
+
+  # Build the binlog router
+  set(BUILD_BINLOG TRUE CACHE BOOL "Build binlog router")
 
   # Use gcov build flags
   set(GCOV FALSE CACHE BOOL "Use gcov build flags")
 
   # Install init.d scripts and ldconf configuration files
-  set(INSTALL_SYSTEM_FILES TRUE CACHE BOOL "Install init.d scripts and ldconf configuration files")
+  set(WITH_SCRIPTS TRUE CACHE BOOL "Install init.d scripts and ldconf configuration files")
 
   # Build tests
   set(BUILD_TESTS FALSE CACHE BOOL "Build tests")
+
+  # Build packages
+  set(PACKAGE FALSE CACHE BOOL "Enable package building (this disables local installation of system files)")
+
+  # Build extra tools
+  set(BUILD_TOOLS FALSE CACHE BOOL "Build extra utility tools")
 
 endmacro()
 
@@ -98,6 +108,7 @@ macro(check_dirs)
   
   if(DEFINED MYSQL_DIR)
 	debugmsg("Searching for MySQL headers at: ${MYSQL_DIR}")
+    list(APPEND CMAKE_INCLUDE_PATH ${MYSQL_DIR})
 	find_path(MYSQL_DIR_LOC mysql.h PATHS ${MYSQL_DIR} PATH_SUFFIXES mysql mariadb NO_DEFAULT_PATH)
   else()
 	find_path(MYSQL_DIR_LOC mysql.h PATH_SUFFIXES mysql mariadb)
@@ -129,7 +140,7 @@ debugmsg("Search returned: ${MYSQL_DIR_LOC}")
 	  message(STATUS "Using custom errmsg.sys found at: ${ERRMSG_FILE}")
 	endif()
   else()
-	find_file(ERRMSG_FILE errmsg.sys PATHS /usr/share/mysql /usr/local/share/mysql PATH_SUFFIXES english)
+	find_file(ERRMSG_FILE errmsg.sys PATHS /usr/share /usr/share/mysql /usr/local/share/mysql PATH_SUFFIXES english mysql/english)
 	if(${ERRMSG_FILE} MATCHES "NOTFOUND")
 	  set(DEPS_OK FALSE CACHE BOOL "If all the dependencies were found.")
       message(FATAL_ERROR "Fatal Error: The errmsg.sys file was not found, please define the path to it by using -DERRMSG=<path>")
@@ -145,7 +156,7 @@ debugmsg("Search returned: ${MYSQL_DIR_LOC}")
   if (DEFINED EMBEDDED_LIB)
 	if( NOT (IS_DIRECTORY ${EMBEDDED_LIB}) )
 	  debugmsg("EMBEDDED_LIB is not a directory: ${EMBEDDED_LIB}")
-	  if(${CMAKE_VERSION} VERSION_LESS 2.12 )
+	  if(${CMAKE_VERSION} VERSION_LESS 2.8.12 )
 		set(COMP_VAR PATH)
 	  else()
 		set(COMP_VAR DIRECTORY)
@@ -218,53 +229,9 @@ debugmsg("Search returned: ${MYSQL_DIR_LOC}")
   unset(DEB_FNC)
   unset(RPM_FNC)
 
-  #Find the MySQL client library
-#  find_library(MYSQLCLIENT_LIBRARIES NAMES mysqlclient PATH_SUFFIXES mysql mariadb)
-#  if(${MYSQLCLIENT_LIBRARIES} MATCHES "NOTFOUND")
-#	set(MYSQLCLIENT_FOUND FALSE CACHE INTERNAL "")
-#	message(STATUS "Cannot find MySQL client library: Login tests disabled.")
-#  else()
-#	set(MYSQLCLIENT_FOUND TRUE CACHE INTERNAL "")
-#	message(STATUS "Found MySQL client library: ${MYSQLCLIENT_LIBRARIES}")
-#  endif()
-
   #Check RabbitMQ headers and libraries
   if(BUILD_RABBITMQ)
 	find_package(RabbitMQ)
-#	include(CheckCSourceCompiles)
-#
-#	if(DEFINED RABBITMQ_LIB)
-#	  find_library(RMQ_LIB rabbitmq PATHS ${RABBITMQ_LIB} NO_DEFAULT_PATH)
-#	else()
-#	  find_library(RMQ_LIB rabbitmq)
-#	endif()
-#	if(RMQ_LIB MATCHES "NOTFOUND")
-#	  set(DEPS_OK FALSE CACHE BOOL "If all the dependencies were found.")
-#	  message(FATAL_ERROR "Cannot find RabbitMQ libraries, please define the path to the libraries with -DRABBITMQ_LIB=<path>")
-#	else()
-#	  set(RABBITMQ_LIB ${RMQ_LIB} CACHE PATH "Path to RabbitMQ libraries" FORCE)
-#	  message(STATUS "Using RabbitMQ libraries found at: ${RABBITMQ_LIB}")
-#	endif()
-#
-#	if(DEFINED RABBITMQ_HEADERS)
-#	  find_file(RMQ_HEADERS amqp.h PATHS ${RABBITMQ_HEADERS} NO_DEFAULT_PATH)
-#	else()
-#	  find_file(RMQ_HEADERS amqp.h)
-#	endif()
-#	if(RMQ_HEADERS MATCHES "NOTFOUND")
-#	  set(DEPS_OK FALSE CACHE BOOL "If all the dependencies were found.")
-#	  message(FATAL_ERROR "Cannot find RabbitMQ headers, please define the path to the headers with -DRABBITMQ_HEADERS=<path>")
-#	else()
-#	  set(RABBITMQ_HEADERS ${RMQ_HEADERS} CACHE PATH "Path to RabbitMQ headers" FORCE)
-#	  message(STATUS "Using RabbitMQ headers found at: ${RABBITMQ_HEADERS}")
-#	endif()
-#
-#	set(CMAKE_REQUIRED_INCLUDES ${RABBITMQ_HEADERS})
-#	check_c_source_compiles("#include <amqp.h>\n int main(){if(AMQP_DELIVERY_PERSISTENT){return 0;}return 1;}" HAVE_RMQ50)
-#	if(NOT HAVE_RMQ50)
-#	  message(FATAL_ERROR "Old version of RabbitMQ-C library found. Version 0.5 or newer is required.")
-#	endif()
-#	
   endif()
 
 endmacro()

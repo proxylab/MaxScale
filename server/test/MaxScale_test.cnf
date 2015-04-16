@@ -1,6 +1,13 @@
 [maxscale]
 threads=4
 
+[feedback]
+feedback_enable=true
+feedback_user_info=user_info
+feedback_url=http://127.0.0.1:8080/load.php
+feedback_timeout=60
+feedback_connect_timeout=60
+
 [MySQL Monitor]
 type=monitor
 module=mysqlmon
@@ -17,6 +24,14 @@ user=maxuser
 passwd=maxpwd
 max_slave_connections=100%
 
+[SchemaRouter Router]
+type=service
+router=schemarouter
+servers=server1,server2,server3,server4
+user=maxuser
+passwd=maxpwd
+auth_all_servers=1
+
 [RW Split Hint Router]
 type=service
 router=readwritesplit
@@ -25,7 +40,6 @@ user=maxuser
 passwd=maxpwd
 max_slave_connections=100%
 filters=Hint
-
 
 [Read Connection Router]
 type=service
@@ -54,7 +68,6 @@ type=filter
 module=tee
 service=RW Split Hint Router
 
-
 [Debug Interface]
 type=service
 router=debugcli
@@ -75,6 +88,12 @@ service=RW Split Router
 protocol=MySQLClient
 port=4006
 
+[SchemaRouter Listener]
+type=listener
+service=SchemaRouter Router
+protocol=MySQLClient
+port=4010
+
 [RW Split Hint Listener]
 type=listener
 service=RW Split Hint Router
@@ -92,6 +111,7 @@ type=listener
 service=CLI
 protocol=maxscaled
 port=6603
+
 [server1]
 type=server
 address=127.0.0.1
