@@ -72,6 +72,7 @@
 #include <regex.h>
 #include <query_classifier.h>
 #include "czmq.h"
+#include <json.h>
 
 extern int lm_enabled_logfiles_bitmask;
 
@@ -220,6 +221,7 @@ static long bytesToLong(const unsigned char *data, int start, size_t size);
 static char* longToBytes(long num, const size_t sz);
 static bool invalid_char (int c);
 static void strip(char * str);
+JsonNode* infoToJson(const ZMQ_INFO * data);
 
 /**
  * Implementation of the mandatory version entry point
@@ -495,148 +497,159 @@ routeQuery(FILTER *instance, void *session, GWBUF *queue)
     char            *ptr = NULL;
     int             length;
         
-    if (my_session->active && modutil_extract_SQL(queue, &ptr, &length))
+    if (my_session->active)
     {       
-        skygw_log_write(LOGFILE_DEBUG, "zmqfilter: Query received");
-        freeInfo(&my_session->current);
-
-        if ((my_instance->match == NULL || regexec(&my_instance->re, ptr, 0, NULL, 0) == 0) &&
-                (my_instance->exclude == NULL || regexec(&my_instance->exre,ptr,0,NULL, 0) != 0))
+        if (queue->next != NULL)
         {
+            queue = gwbuf_make_contiguous(queue);
+        }
+        
+        if ((ptr = modutil_get_SQL(queue)) != NULL)
+        {
+            skygw_log_write(LOGFILE_DEBUG, "zmqfilter: Query received");
+            freeInfo(&my_session->current);
 
-            if((my_session->current = (ZMQ_INFO*) malloc(sizeof(ZMQ_INFO))) == NULL){
-                my_session->active = 0;
-                skygw_log_write(LOGFILE_ERROR, "zmqfilter: Memory allocation failed for: %s" , "route_query");                            
-            }
-            else
+            if ((my_instance->match == NULL || regexec(&my_instance->re, ptr, 0, NULL, 0) == 0) &&
+                    (my_instance->exclude == NULL || regexec(&my_instance->exre,ptr,0,NULL, 0) != 0))
             {
-                my_session->n_statements++;
-                my_session->current->clientName = strdup(my_session->clientHost);
 
-                my_session->current->sqlQuery = NULL;
-                my_session->current->canonicalSql = NULL;
-                my_session->current->queryError = NULL;
-                my_session->current->transactionId = NULL;
-                my_session->current->serverId = 0;
-                my_session->current->serverName = NULL;
-                my_session->current->serverUniqueName = NULL;
-                my_session->current->affectedTables = NULL;
-                my_session->current->isRealQuery = false;
-                my_session->current->statementType = QUERY_TYPE_UNKNOWN;
-
-                gettimeofday(&my_session->current->requestTime, NULL);
-                my_session->current->sqlQuery = strndup(ptr, length);        
-
-                int i, tbl_count = 0;
-                char **tables;
-                if (!query_is_parsed(queue)){
-                    if(parse_query(queue)){
-                        skygw_log_write(LOGFILE_DEBUG, "zmqfilter: Query parsed.");
-
-                        my_session->current->isRealQuery = skygw_is_real_query(queue);
-                        my_session->current->statementType = query_classifier_get_type(queue);
-
-                        if(my_session->current->isRealQuery){
-                            skygw_log_write(LOGFILE_DEBUG, "zmqfilter: Current is real query.");            
-                            
-                            //get query tables 
-                            tables = skygw_get_table_names(queue, &tbl_count, false);
-                            my_session->current->canonicalSql = skygw_get_canonical(queue);                            
-                            
-                            if(tbl_count > 0)
-                                my_session->current->affectedTables = str_join(tables, ",", tbl_count);
-
-                            char *real_query_t = skygw_get_realq_type_str(queue);
-                            if(strcmp(real_query_t, "SELECT") == 0)
-                                my_session->current->canonCmdType = SELECT;
-                            else if(strcmp(real_query_t, "INSERT") == 0)
-                                my_session->current->canonCmdType = INSERT;
-                            else if(strcmp(real_query_t, "INSERT_SELECT") == 0)
-                                my_session->current->canonCmdType = INSERT_SELECT;
-                            else if(strcmp(real_query_t, "UPDATE") == 0)
-                                my_session->current->canonCmdType = UPDATE;
-                            else if(strcmp(real_query_t, "REPLACE") == 0)
-                                my_session->current->canonCmdType = REPLACE;
-                            else if(strcmp(real_query_t, "REPLACE_SELECT") == 0)
-                                my_session->current->canonCmdType = REPLACE_SELECT;
-                            else if(strcmp(real_query_t, "DELETE") == 0)
-                                my_session->current->canonCmdType = DELETE;
-                            else if(strcmp(real_query_t, "TRUNCATE") == 0)
-                                my_session->current->canonCmdType = TRUNCATE;
-                            else if(strcmp(real_query_t, "PREPARE") == 0)
-                                my_session->current->canonCmdType = PREPARE;
-                            else if(strcmp(real_query_t, "EXECUTE") == 0)
-                                my_session->current->canonCmdType = EXECUTE;
-                            else
-                                my_session->current->canonCmdType = OTHER;
-                            
-                            free(real_query_t);
-                        }
-                    }                            
+                if((my_session->current = (ZMQ_INFO*) malloc(sizeof(ZMQ_INFO))) == NULL){
+                    my_session->active = 0;
+                    skygw_log_write(LOGFILE_ERROR, "zmqfilter: Memory allocation failed for: %s" , "route_query");                            
                 }
-                
-                //save real queries only
-                if(my_instance->saveRealOnly && !my_session->current->isRealQuery){
-                    freeInfo(&my_session->current);
-                    goto send_to_downstream;
-                }
+                else
+                {
+                    my_session->n_statements++;
+                    my_session->current->clientName = strdup(my_session->clientHost);
 
-                //save only if query is related to one or more included tables
-                if(my_instance->includedTables && tbl_count > 0){
-                    skygw_log_write(LOGFILE_DEBUG, "zmqfilter: Analyzing included tables filter.");
-                    char **cnf_tables;
-                    int cnf_tables_cnt = strCharCount(my_instance->includedTables, ',');
-                    bool found = false;
+                    my_session->current->sqlQuery = NULL;
+                    my_session->current->canonicalSql = NULL;
+                    my_session->current->queryError = NULL;
+                    my_session->current->transactionId = NULL;
+                    my_session->current->serverId = 0;
+                    my_session->current->serverName = NULL;
+                    my_session->current->serverUniqueName = NULL;
+                    my_session->current->affectedTables = NULL;
+                    my_session->current->isRealQuery = false;
+                    my_session->current->statementType = QUERY_TYPE_UNKNOWN;
 
-                    if(cnf_tables_cnt >= 1){//more than one tables to check
-                        cnf_tables_cnt++;
+                    gettimeofday(&my_session->current->requestTime, NULL);
+                    my_session->current->sqlQuery = strndup(ptr, length);        
 
-                        char *tmp = strdup(my_instance->includedTables);
-                        cnf_tables = str_split(tmp, ',');
-                        free(tmp);
+                    int i, tbl_count = 0;
+                    char **tables;
+                    if (!query_is_parsed(queue)){
+                        if(parse_query(queue)){
+                            skygw_log_write(LOGFILE_DEBUG, "zmqfilter: Query parsed.");
 
-                        int j;
-                        for(i = 0; i < tbl_count; i++){
-                            for(j = 0; j < cnf_tables_cnt; j++)
-                                if(strcmp(cnf_tables[j], tables[i]) == 0){
+                            my_session->current->isRealQuery = skygw_is_real_query(queue);
+                            my_session->current->statementType = query_classifier_get_type(queue);
+
+                            if(my_session->current->isRealQuery){
+                                skygw_log_write(LOGFILE_DEBUG, "zmqfilter: Current is real query.");            
+
+                                //get query tables 
+                                tables = skygw_get_table_names(queue, &tbl_count, false);
+                                my_session->current->canonicalSql = skygw_get_canonical(queue);                            
+
+                                if(tbl_count > 0)
+                                    my_session->current->affectedTables = str_join(tables, ",", tbl_count);
+
+                                char *real_query_t = skygw_get_realq_type_str(queue);
+                                if(strcmp(real_query_t, "SELECT") == 0)
+                                    my_session->current->canonCmdType = SELECT;
+                                else if(strcmp(real_query_t, "INSERT") == 0)
+                                    my_session->current->canonCmdType = INSERT;
+                                else if(strcmp(real_query_t, "INSERT_SELECT") == 0)
+                                    my_session->current->canonCmdType = INSERT_SELECT;
+                                else if(strcmp(real_query_t, "UPDATE") == 0)
+                                    my_session->current->canonCmdType = UPDATE;
+                                else if(strcmp(real_query_t, "REPLACE") == 0)
+                                    my_session->current->canonCmdType = REPLACE;
+                                else if(strcmp(real_query_t, "REPLACE_SELECT") == 0)
+                                    my_session->current->canonCmdType = REPLACE_SELECT;
+                                else if(strcmp(real_query_t, "DELETE") == 0)
+                                    my_session->current->canonCmdType = DELETE;
+                                else if(strcmp(real_query_t, "TRUNCATE") == 0)
+                                    my_session->current->canonCmdType = TRUNCATE;
+                                else if(strcmp(real_query_t, "PREPARE") == 0)
+                                    my_session->current->canonCmdType = PREPARE;
+                                else if(strcmp(real_query_t, "EXECUTE") == 0)
+                                    my_session->current->canonCmdType = EXECUTE;
+                                else
+                                    my_session->current->canonCmdType = OTHER;
+
+                                free(real_query_t);
+                            }
+                        }                            
+                    }
+
+                    //save real queries only
+                    if(my_instance->saveRealOnly && !my_session->current->isRealQuery){
+                        freeInfo(&my_session->current);
+                        goto send_to_downstream;
+                    }
+
+                    //save only if query is related to one or more included tables
+                    if(my_instance->includedTables && tbl_count > 0){
+                        skygw_log_write(LOGFILE_DEBUG, "zmqfilter: Analyzing included tables filter.");
+                        char **cnf_tables;
+                        int cnf_tables_cnt = strCharCount(my_instance->includedTables, ',');
+                        bool found = false;
+
+                        if(cnf_tables_cnt >= 1){//more than one tables to check
+                            cnf_tables_cnt++;
+
+                            char *tmp = strdup(my_instance->includedTables);
+                            cnf_tables = str_split(tmp, ',');
+                            free(tmp);
+
+                            int j;
+                            for(i = 0; i < tbl_count; i++){
+                                for(j = 0; j < cnf_tables_cnt; j++)
+                                    if(strcmp(cnf_tables[j], tables[i]) == 0){
+                                        found = true;
+                                        break;
+                                    }
+
+                                if(found) break;
+                            }
+
+                        } else{//one table to check
+                            for(i = 0; i < tbl_count; i++){
+                                if(strcmp(my_instance->includedTables, tables[i]) == 0){
                                     found = true;
                                     break;
                                 }
-
-                            if(found) break;
-                        }
-
-                    } else{//one table to check
-                        for(i = 0; i < tbl_count; i++){
-                            if(strcmp(my_instance->includedTables, tables[i]) == 0){
-                                found = true;
-                                break;
                             }
                         }
+
+                        for(i=0; i<cnf_tables_cnt; i++)
+                            free(cnf_tables[i]);
+                        free(cnf_tables);
+
+                        if(!found) 
+                            freeInfo(&my_session->current);
                     }
 
-                    for(i=0; i<cnf_tables_cnt; i++)
-                        free(cnf_tables[i]);
-                    free(cnf_tables);
+                    if(tbl_count > 0){
 
-                    if(!found) 
-                        freeInfo(&my_session->current);
-                }
-
-                if(tbl_count > 0){
-
-                    for(i=0; i<tbl_count; i++){
-                        free(tables[i]);
+                        for(i=0; i<tbl_count; i++){
+                            free(tables[i]);
+                        }
+                        free(tables);
                     }
-                    free(tables);
-                }
 
-                //TODO: transactionId  
+                    //TODO: transactionId  
+                }
             }
         }
     }
 
 send_to_downstream:
+        if (ptr != NULL) {
+            free(ptr);
+        }
 	/* Pass the query downstream */
 	return my_session->down.routeQuery(my_session->down.instance, my_session->down.session, queue);
     
@@ -702,7 +715,7 @@ clientReply(FILTER *instance, void *session, GWBUF *reply)
 
             if(!found){
                 freeInfo(&my_session->current);
-                goto send_to_uptream;
+                goto send_to_upstream;
             }
         }
         
@@ -723,14 +736,25 @@ clientReply(FILTER *instance, void *session, GWBUF *reply)
             
         }
 
-        zmsg_t *msg = infoToZmqMessage(my_session->current);
-
-        sendZmqRequest(msg, my_session);
+        //zmsg_t *msg = infoToZmqMessage(my_session->current);
+        JsonNode* json_root = infoToJson(my_session->current);
+        if (json_root == NULL) {
+            freeInfo(&my_session->current);
+            goto send_to_upstream;
+        }
         
+        char * json_msg = json_encode(json_root);
+        zmsg_t *z_msg = zmsg_new ();
+        zmsg_addstr(z_msg, json_msg);
+        
+        sendZmqRequest(z_msg, my_session);
+        
+        free(json_msg);
+        json_delete(json_root);
         freeInfo(&my_session->current);
     }
 
-send_to_uptream:
+send_to_upstream:
     /* Pass the result upstream */
     return my_session->up.clientReply(my_session->up.instance, my_session->up.session, reply);
 }
@@ -830,6 +854,67 @@ static void sendZmqRequest (zmsg_t *request, ZMQ_SESSION *session)
     }
 }
 
+/**
+ * Converts an INFO struct to JSON value.
+ * The return value is a pointer to a newly allocated JsonNode object, 
+ * which must be freed after usage.
+ * 
+ * @param data
+ * @return JsonNode*
+ */
+JsonNode* infoToJson(const ZMQ_INFO * data)
+{
+    JsonNode *info = json_mkobject();
+    if (info == NULL) {
+        goto alloc_error_exit;
+    }
+    
+    JsonNode* duration = json_mkobject();
+    if (duration == NULL) {
+        goto alloc_error_exit;
+    }
+    json_append_member(duration, "tv_sec", json_mknumber((double) data->duration.tv_sec));
+    json_append_member(duration, "tv_usec", json_mknumber((double) data->duration.tv_usec));
+    
+    JsonNode* requestTime = json_mkobject();
+    if (requestTime == NULL) {
+        goto alloc_error_exit;
+    }
+    json_append_member(requestTime, "tv_sec", json_mknumber((double) data->requestTime.tv_sec));
+    json_append_member(requestTime, "tv_usec", json_mknumber((double) data->requestTime.tv_usec));
+    
+    JsonNode* responseTime = json_mkobject();
+    if (responseTime == NULL) {
+        goto alloc_error_exit;
+    }
+    json_append_member(responseTime, "tv_sec", json_mknumber((double) data->responseTime.tv_sec));
+    json_append_member(responseTime, "tv_usec", json_mknumber((double) data->responseTime.tv_usec));
+    
+    json_append_member(info, "serverId", json_mknumber((double) data->serverId));
+    json_append_member(info, "duration", duration);
+    json_append_member(info, "requestTime", requestTime);
+    json_append_member(info, "responseTime", responseTime);
+    json_append_member(info, "statementType", json_mknumber((double) data->statementType));
+    json_append_member(info, "canonCmdType", json_mknumber((double) data->canonCmdType));
+    json_append_member(info, "isRealQuery", json_mkbool(data->isRealQuery));
+    json_append_member(info, "queryFailed", json_mkbool(data->queryFailed));
+    
+    json_append_member(info, "sqlQuery", json_mkstring(data->sqlQuery));
+    json_append_member(info, "canonicalSql", json_mkstring(data->canonicalSql));
+    json_append_member(info, "transactionId", json_mkstring(data->transactionId));
+    json_append_member(info, "clientName", json_mkstring(data->clientName));
+    json_append_member(info, "serverName", json_mkstring(data->serverName));
+    json_append_member(info, "serverUniqueName", json_mkstring(data->serverUniqueName));
+    json_append_member(info, "affectedTables", json_mkstring(data->affectedTables));
+    json_append_member(info, "queryError", json_mkstring(data->queryError));
+    
+    return info;
+    
+alloc_error_exit:
+    skygw_log_write(LOGFILE_ERROR, "zmqfilter: Memory allocation failed for: %s" , "infoToJson");
+    return NULL;
+    
+}
 
 /**
  * Creates and return a new zeromq message object from the given
