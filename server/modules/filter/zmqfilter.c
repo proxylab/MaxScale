@@ -495,7 +495,6 @@ routeQuery(FILTER *instance, void *session, GWBUF *queue)
     ZMQ_INSTANCE    *my_instance = (ZMQ_INSTANCE *)instance;
     ZMQ_SESSION     *my_session = (ZMQ_SESSION *)session;
     char            *ptr = NULL;
-    int             length;
         
     if (my_session->active)
     {       
@@ -534,7 +533,7 @@ routeQuery(FILTER *instance, void *session, GWBUF *queue)
                     my_session->current->statementType = QUERY_TYPE_UNKNOWN;
 
                     gettimeofday(&my_session->current->requestTime, NULL);
-                    my_session->current->sqlQuery = strndup(ptr, length);        
+                    my_session->current->sqlQuery = strdup((const char*) ptr);        
 
                     int i, tbl_count = 0;
                     char **tables;
